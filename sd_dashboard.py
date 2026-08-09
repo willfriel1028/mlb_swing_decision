@@ -6,6 +6,9 @@ from dash import dcc, html, Input, Output, dash_table
 import pandas as pd
 import numpy as np
 
+# DuckDB
+import duckdb
+
 # Pybaseball imports
 from pybaseball import statcast
 from pybaseball import playerid_reverse_lookup
@@ -27,63 +30,71 @@ server = app.server
 df = pd.read_parquet('season_data.parquet')
 
 # This function returns the default view dataframe that the dashboard automatically presents
-def default(df):
+def default(count=None, outs=None, bases=None, phand=None, pitch_type=None):
+    where_clause = build_where_clause(count, outs, bases, phand, pitch_type)
 
-    # Group by just the batter
-    chart1 = df.groupby(["batter"]).agg(
-        player = ("batter_name", "first"),
-        bats = ("stand", "first"),
-        team = ("batting_team", "first"),
-        PA = ("PA", "first"),
-        correct_sd = ("correct_sd", "sum"),
-        strike_swing = ("strike_swing", "sum"),
-        strike_taken = ("strike_taken", "sum"),
-        ball_swing = ("ball_swing", "sum"),
-        ball_taken = ("ball_taken", "sum"),
-        total = ("batter", "count")
-    )
-    chart1 = chart1.reset_index()
-
-    # Define SD-related percentages
-    chart1["iz%"] = round(chart1["strike_swing"] / (chart1["strike_swing"] + chart1["strike_taken"]) * 100, 1)
-    chart1["ooz%"] = round(chart1["ball_taken"] / (chart1["ball_taken"] + chart1["ball_swing"]) * 100, 1)
-    chart1["sd%"] = round(chart1["correct_sd"] / chart1["total"] * 100, 1)
-
-    # Get percentiles for each SD metric
-    eligible = chart1["total"] >= 150
-    chart1["iz"] = round(chart1.loc[eligible, "iz%"].rank(pct=True) * 100)
-    chart1["ooz"] = round(chart1.loc[eligible, "ooz%"].rank(pct=True) * 100)
-    chart1["sd"] = round(chart1.loc[eligible, "sd%"].rank(pct=True) * 100)
-
-    # Include only columns of interest
-    chart1 = chart1[["batter", "player", "bats", "team", "PA", "iz%", "iz", "ooz%", "ooz", "sd%", "sd"]]
-
-    # Sort by Correct Swing Decision %
+    query = f"""
+        WITH agg AS (
+            SELECT
+                batter,
+                FIRST(batter_name) AS player,
+                FIRST(stand) AS bats,
+                FIRST(batting_team) AS team,
+                FIRST(PA) AS PA,
+                SUM(correct_sd) AS correct_sd,
+                SUM(strike_swing) AS strike_swing,
+                SUM(strike_taken) AS strike_taken,
+                SUM(ball_swing) AS ball_swing,
+                SUM(ball_taken) AS ball_taken,
+                COUNT(*) AS pitches,
+                SUM(strike_swing) * 100.0 / (SUM(strike_swing) + SUM(strike_taken)) AS iz_raw,
+                SUM(ball_taken) * 100.0 / (SUM(ball_taken) + SUM(ball_swing)) AS ooz_raw,
+                SUM(correct_sd) * 100.0 / COUNT(*) AS sd_raw
+            FROM 'season_data.parquet'
+            WHERE {where_clause}
+            GROUP BY batter
+        )
+        SELECT
+            * EXCLUDE (iz_raw, ooz_raw, sd_raw),
+            ROUND(iz_raw, 1) AS "iz%",
+            ROUND(ooz_raw, 1) AS "ooz%",
+            ROUND(sd_raw, 1) AS "sd%",
+            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY iz_raw) * 100) ELSE NULL END AS iz,
+            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY ooz_raw) * 100) ELSE NULL END AS ooz,
+            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY sd_raw) * 100) ELSE NULL END AS sd
+        FROM agg
+    """
+    chart1 = duckdb.sql(query).df()
+    chart1 = chart1[["batter", "player", "bats", "team", "PA", "pitches", "iz%", "iz", "ooz%", "ooz", "sd%", "sd"]]
     chart1 = chart1.sort_values("PA", ascending=False)
-
-    # Return updated df
     return chart1
 
 # This function returns the version of the dataframe that is split by the handedness of the opposing pitcher
-def pitcher_hand(df):
+def pitcher_hand(count=None, outs=None, bases=None, phand=None, pitch_type=None):
+    where_clause = build_where_clause(count, outs, bases, phand, pitch_type)
 
-    # Group by batter and pitcher handedness
-    y = df.groupby(["batter", "p_throws"]).agg(
-        player = ("batter_name", "first"),
-        bats = ("stand", "first"),
-        team = ("batting_team", "first"),
-        PA = ("PA", "first"),
-        correct_sd = ("correct_sd", "sum"),
-        strike_swing = ("strike_swing", "sum"),
-        strike_taken = ("strike_taken", "sum"),
-        ball_swing = ("ball_swing", "sum"),
-        ball_taken = ("ball_taken", "sum"),
-        total = ("batter", "count")
-    )
-    y = y.reset_index()
+    query = f"""
+        SELECT
+            batter,
+            p_throws,
+            FIRST(batter_name) AS player,
+            FIRST(stand) AS bats,
+            FIRST(batting_team) AS team,
+            FIRST(PA) AS PA,
+            SUM(correct_sd) AS correct_sd,
+            SUM(strike_swing) AS strike_swing,
+            SUM(strike_taken) AS strike_taken,
+            SUM(ball_swing) AS ball_swing,
+            SUM(ball_taken) AS ball_taken,
+            COUNT(*) AS pitches
+        FROM 'season_data.parquet'
+        WHERE {where_clause}
+        GROUP BY batter, p_throws
+    """
+    y = duckdb.sql(query).df()
 
     # Columns to attain for both right and left handed pitchers
-    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'total']
+    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'pitches']
 
     # Pivot data
     chart2 = y.pivot(
@@ -92,132 +103,191 @@ def pitcher_hand(df):
         values=metric_cols
     )
 
-    # Create a column for RHP and LHP with columns of interest
     chart2.columns = [f'{col}_{side}' for col, side in chart2.columns]
     chart2 = chart2.reset_index()
 
-    # Ensure columns are numeric
+    # Add any missing R/L columns as all-NaN (happens when phand filters out one hand entirely)
     metric_side_cols = [f"{m}_{s}" for m in metric_cols for s in ["R", "L"]]
+    missing_cols = [c for c in metric_side_cols if c not in chart2.columns]
+    for col in missing_cols:
+        chart2[col] = np.nan
+
     chart2[metric_side_cols] = chart2[metric_side_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Make sure correct team is assigned
-    team_lookup = df.groupby('batter')['batting_team'].first().rename('team')  
+    team_lookup = y.groupby('batter')['team'].first().rename('team')
     chart2 = chart2.merge(team_lookup, on='batter', how='left')
 
-    # Define SD-related percentages vs RHP and LHP
-    for side in ["R", "L"]:
-        chart2[f"iz% vs {side}HP"] = round(chart2[f"strike_swing_{side}"] / (chart2[f"strike_swing_{side}"] + chart2[f"strike_taken_{side}"]) * 100, 1)
-        chart2[f"ooz% vs {side}HP"] = round(chart2[f"ball_taken_{side}"] / (chart2[f"ball_swing_{side}"] + chart2[f"ball_taken_{side}"]) * 100, 1)
-        chart2[f"sd% vs {side}HP"] = round(chart2[f"correct_sd_{side}"] / chart2[f"total_{side}"] * 100, 1)
+    query2 = """
+        SELECT
+            * EXCLUDE (iz_raw_R, iz_raw_L, ooz_raw_R, ooz_raw_L, sd_raw_R, sd_raw_L),
+            ROUND(iz_raw_R, 1) AS "iz% vs RHP",
+            ROUND(iz_raw_L, 1) AS "iz% vs LHP",
+            ROUND(ooz_raw_R, 1) AS "ooz% vs RHP",
+            ROUND(ooz_raw_L, 1) AS "ooz% vs LHP",
+            ROUND(sd_raw_R, 1) AS "sd% vs RHP",
+            ROUND(sd_raw_L, 1) AS "sd% vs LHP",
+            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY iz_raw_R) * 100) ELSE NULL END AS "iz vs RHP",
+            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY iz_raw_L) * 100) ELSE NULL END AS "iz vs LHP",
+            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY ooz_raw_R) * 100) ELSE NULL END AS "ooz vs RHP",
+            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY ooz_raw_L) * 100) ELSE NULL END AS "ooz vs LHP",
+            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY sd_raw_R) * 100) ELSE NULL END AS "sd vs RHP",
+            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY sd_raw_L) * 100) ELSE NULL END AS "sd vs LHP"
+        FROM (
+            SELECT
+                *,
+                strike_swing_R * 100.0 / NULLIF(strike_swing_R + strike_taken_R, 0) AS iz_raw_R,
+                strike_swing_L * 100.0 / NULLIF(strike_swing_L + strike_taken_L, 0) AS iz_raw_L,
+                ball_taken_R * 100.0 / NULLIF(ball_taken_R + ball_swing_R, 0) AS ooz_raw_R,
+                ball_taken_L * 100.0 / NULLIF(ball_taken_L + ball_swing_L, 0) AS ooz_raw_L,
+                correct_sd_R * 100.0 / NULLIF(pitches_R, 0) AS sd_raw_R,
+                correct_sd_L * 100.0 / NULLIF(pitches_L, 0) AS sd_raw_L
+            FROM chart2
+        )
+    """
+    chart2 = duckdb.sql(query2).df()
 
-    # Get percentiles for each SD metric
-    for side in ["R", "L"]:
-        eligible = chart2[f"total_{side}"] >= 100
-        chart2[f"iz vs {side}HP"] = round(chart2.loc[eligible, f"iz% vs {side}HP"].rank(pct=True) * 100)
-        chart2[f"ooz vs {side}HP"] = round(chart2.loc[eligible, f"ooz% vs {side}HP"].rank(pct=True) * 100)
-        chart2[f"sd vs {side}HP"] = round(chart2.loc[eligible, f"sd% vs {side}HP"].rank(pct=True) * 100)
+    chart2["pitches"] = round(chart2["pitches_R"].add(chart2["pitches_L"], fill_value=0))
 
-    # Only include columns of interest
-    chart2 = chart2[['batter', 'player', 'bats', 'team', 'PA', 'iz% vs RHP',
-                     'ooz% vs RHP', 'sd% vs RHP', 'iz% vs LHP', 'ooz% vs LHP',
-                     'sd% vs LHP', 'iz vs RHP', 'ooz vs RHP',
-                     'sd vs RHP', 'iz vs LHP', 'ooz vs LHP', 'sd vs LHP']]
-
-    # Sort by PA
+    chart2 = chart2[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
+                     'iz% vs RHP', 'ooz% vs RHP', 'sd% vs RHP', 
+                     'iz% vs LHP', 'ooz% vs LHP', 'sd% vs LHP', 
+                     'iz vs RHP', 'ooz vs RHP', 'sd vs RHP', 
+                     'iz vs LHP', 'ooz vs LHP', 'sd vs LHP']]
     chart2 = chart2.sort_values("PA", ascending=False)
-
-    # Return updated df
     return chart2
 
 # This function returns the version of the dataframe that is split by the pitch type the batter is facing
-def pitch_group(df):
+def pitch_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
+    where_clause = build_where_clause(count, outs, bases, phand, pitch_type)
 
-    # Group by batter and pitch group
-    w = df.groupby(["batter", "pitch_group"]).agg(
-        player = ("batter_name", "first"),
-        bats = ("stand", "first"),
-        team = ("batting_team", "first"),
-        PA = ("PA", "first"),
-        correct_sd = ("correct_sd", "sum"),
-        strike_swing = ("strike_swing", "sum"),
-        strike_taken = ("strike_taken", "sum"),
-        ball_swing = ("ball_swing", "sum"),
-        ball_taken = ("ball_taken", "sum"),
-        total = ("batter", "count")
-    )
-    w = w.reset_index()
+    query = f"""
+        SELECT
+            batter,
+            pitch_group,
+            FIRST(batter_name) AS player,
+            FIRST(stand) AS bats,
+            FIRST(batting_team) AS team,
+            FIRST(PA) AS PA,
+            SUM(correct_sd) AS correct_sd,
+            SUM(strike_swing) AS strike_swing,
+            SUM(strike_taken) AS strike_taken,
+            SUM(ball_swing) AS ball_swing,
+            SUM(ball_taken) AS ball_taken,
+            COUNT(*) AS pitches
+        FROM 'season_data.parquet'
+        WHERE {where_clause}
+        GROUP BY batter, pitch_group
+    """
+    y = duckdb.sql(query).df()
 
     # Columns to attain for all pitch groups
-    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'total']
+    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'pitches']
 
     # Pivot data
-    chart3 = w.pivot(
+    chart3 = y.pivot(
         index=['batter', 'player', 'bats', 'PA'],
         columns='pitch_group',
         values=metric_cols
     )
 
-    # Create a column for FA, OFF, and BB with columns of interest
-    chart3.columns = [f'{col}_{side}' for col, side in chart3.columns]
+    chart3.columns = [f'{col}_{group}' for col, group in chart3.columns]
     chart3 = chart3.reset_index()
 
-    # Ensure columns are numeric
-    metric_type_cols = [f"{m}_{t}" for m in metric_cols for t in ["FA", "OFF", "BB"]]
-    chart3[metric_type_cols] = chart3[metric_type_cols].apply(pd.to_numeric, errors="coerce")
+    # Add any missing pitch group columns as all-NaN (happens when pitch_type filters out others entirely)
+    metric_side_cols = [f"{m}_{g}" for m in metric_cols for g in ["FA", "OFF", "BB"]]
+    missing_cols = [c for c in metric_side_cols if c not in chart3.columns]
+    for col in missing_cols:
+        chart3[col] = np.nan
 
-    # Make sure correct team is assigned
-    team_lookup = df.groupby('batter')['batting_team'].first().rename('team')  
+    chart3[metric_side_cols] = chart3[metric_side_cols].apply(pd.to_numeric, errors="coerce")
+
+    team_lookup = y.groupby('batter')['team'].first().rename('team')
     chart3 = chart3.merge(team_lookup, on='batter', how='left')
 
-    # Define SD-related percentages vs FA, OFF, and BB
-    for group in ["FA", "OFF", "BB"]:
-        chart3[f"iz% vs {group}"] = round(chart3[f"strike_swing_{group}"] / (chart3[f"strike_swing_{group}"] + chart3[f"strike_taken_{group}"]) * 100, 1)
-        chart3[f"ooz% vs {group}"] = round(chart3[f"ball_taken_{group}"] / (chart3[f"ball_swing_{group}"] + chart3[f"ball_taken_{group}"]) * 100, 1)
-        chart3[f"sd% vs {group}"] = round(chart3[f"correct_sd_{group}"] / chart3[f"total_{group}"] * 100, 1)
+    query2 = """
+        SELECT
+            * EXCLUDE (iz_raw_FA, iz_raw_OFF, iz_raw_BB, ooz_raw_FA, ooz_raw_OFF, ooz_raw_BB, sd_raw_FA, sd_raw_OFF, sd_raw_BB),
+            ROUND(iz_raw_FA, 1) AS "iz% vs FA",
+            ROUND(iz_raw_OFF, 1) AS "iz% vs OFF",
+            ROUND(iz_raw_BB, 1) AS "iz% vs BB",
+            ROUND(ooz_raw_FA, 1) AS "ooz% vs FA",
+            ROUND(ooz_raw_OFF, 1) AS "ooz% vs OFF",
+            ROUND(ooz_raw_BB, 1) AS "ooz% vs BB",
+            ROUND(sd_raw_FA, 1) AS "sd% vs FA",
+            ROUND(sd_raw_OFF, 1) AS "sd% vs OFF",
+            ROUND(sd_raw_BB, 1) AS "sd% vs BB",
+            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY iz_raw_FA) * 100) ELSE NULL END AS "iz vs FA",
+            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY ooz_raw_FA) * 100) ELSE NULL END AS "ooz vs FA",
+            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY sd_raw_FA) * 100) ELSE NULL END AS "sd vs FA",
+            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY iz_raw_OFF) * 100) ELSE NULL END AS "iz vs OFF",
+            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY ooz_raw_OFF) * 100) ELSE NULL END AS "ooz vs OFF",
+            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY sd_raw_OFF) * 100) ELSE NULL END AS "sd vs OFF",
+            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY iz_raw_BB) * 100) ELSE NULL END AS "iz vs BB",
+            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY ooz_raw_BB) * 100) ELSE NULL END AS "ooz vs BB",
+            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY sd_raw_BB) * 100) ELSE NULL END AS "sd vs BB",
+        FROM (
+            SELECT
+                *,
+                strike_swing_FA * 100.0 / NULLIF(strike_swing_FA + strike_taken_FA, 0) AS iz_raw_FA,
+                strike_swing_OFF * 100.0 / NULLIF(strike_swing_OFF + strike_taken_OFF, 0) AS iz_raw_OFF,
+                strike_swing_BB * 100.0 / NULLIF(strike_swing_BB + strike_taken_BB, 0) AS iz_raw_BB,
+                ball_taken_FA * 100.0 / NULLIF(ball_swing_FA + ball_taken_FA, 0) AS ooz_raw_FA,
+                ball_taken_OFF * 100.0 / NULLIF(ball_swing_OFF + ball_taken_OFF, 0) AS ooz_raw_OFF,
+                ball_taken_BB * 100.0 / NULLIF(ball_swing_BB + ball_taken_BB, 0) AS ooz_raw_BB,
+                correct_sd_FA * 100.0 / NULLIF(pitches_FA, 0) AS sd_raw_FA,
+                correct_sd_OFF * 100.0 / NULLIF(pitches_OFF, 0) AS sd_raw_OFF,
+                correct_sd_BB * 100.0 / NULLIF(pitches_BB, 0) AS sd_raw_BB,
+            FROM chart3
+        )
+    """
+    chart3 = duckdb.sql(query2).df()
 
-    # Get percentiles for each SD metric
-    for group in ["FA", "OFF", "BB"]:
-        eligible = chart3[f"total_{group}"] >= 50
-        chart3[f"iz vs {group}"] = round(chart3.loc[eligible, f"iz% vs {group}"].rank(pct=True) * 100)
-        chart3[f"ooz vs {group}"] = round(chart3.loc[eligible, f"ooz% vs {group}"].rank(pct=True) * 100)
-        chart3[f"sd vs {group}"] = round(chart3.loc[eligible, f"sd% vs {group}"].rank(pct=True) * 100)
-    
-    # Only include columns of interest
-    chart3 = chart3[['batter', 'player', 'bats', 'team', 'PA', 'iz% vs FA',
-                     'ooz% vs FA', 'sd% vs FA', 'iz% vs OFF', 'ooz% vs OFF',
-                     'sd% vs OFF', 'iz% vs BB', 'ooz% vs BB', 'sd% vs BB',
-                     'iz vs FA', 'ooz vs FA', 'sd vs FA',
+    chart3["pitches"] = round(
+        chart3["pitches_FA"]
+        .add(chart3["pitches_OFF"], fill_value=0)
+        .add(chart3["pitches_BB"], fill_value=0)
+    )
+
+    chart3 = chart3[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
+                     'iz% vs FA', 'ooz% vs FA', 'sd% vs FA', 
+                     'iz% vs OFF', 'ooz% vs OFF', 'sd% vs OFF', 
+                     'iz% vs BB', 'ooz% vs BB', 'sd% vs BB',
+                     'iz vs FA', 'ooz vs FA', 'sd vs FA', 
                      'iz vs OFF', 'ooz vs OFF', 'sd vs OFF',
                      'iz vs BB', 'ooz vs BB', 'sd vs BB']]
-
-    # Sort by PA
     chart3 = chart3.sort_values("PA", ascending=False)
-    
-    # Return updated df
     return chart3
 
-def hand_group(df):
+# This function returns the version of the dataframe that is split by the opposing pitcher handedness and the pitch type the batter is facing
+def hand_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
+    where_clause = build_where_clause(count, outs, bases, phand, pitch_type)
 
-    # Group by batter, pitcher handedness, and pitch type
-    z = df.groupby(["batter", "p_throws", "pitch_group"]).agg(
-        player = ("batter_name", "first"),
-        bats = ("stand", "first"),
-        team = ("batting_team", "first"),
-        PA = ("PA", "first"),
-        correct_sd = ("correct_sd", "sum"),
-        strike_swing = ("strike_swing", "sum"),
-        strike_taken = ("strike_taken", "sum"),
-        ball_swing = ("ball_swing", "sum"),
-        ball_taken = ("ball_taken", "sum"),
-        total = ("batter", "count")
-    )
-    z = z.reset_index()
+    query = f"""
+        SELECT
+            batter,
+            p_throws,
+            pitch_group,
+            FIRST(batter_name) AS player,
+            FIRST(stand) AS bats,
+            FIRST(batting_team) AS team,
+            FIRST(PA) AS PA,
+            SUM(correct_sd) AS correct_sd,
+            SUM(strike_swing) AS strike_swing,
+            SUM(strike_taken) AS strike_taken,
+            SUM(ball_swing) AS ball_swing,
+            SUM(ball_taken) AS ball_taken,
+            COUNT(*) AS pitches
+        FROM 'season_data.parquet'
+        WHERE {where_clause}
+        GROUP BY batter, p_throws, pitch_group
+    """
+    y = duckdb.sql(query).df()
 
     # Columns to attain for all pitcher handedness + pitch group combos
-    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'total']
+    metric_cols = ['correct_sd', 'strike_swing', 'strike_taken', 'ball_swing', 'ball_taken', 'pitches']
 
     # Pivot data
-    chart4 = z.pivot(
+    chart4 = y.pivot(
         index=['batter', 'player', 'bats', 'PA'],
         columns=['p_throws', 'pitch_group'],
         values=metric_cols
@@ -229,50 +299,153 @@ def hand_group(df):
 
     # Ensure columns are numeric
     metric_side_type_cols = [f"{m}_{s}_{t}" for m in metric_cols for s in ["R", "L"] for t in ["FA", "OFF", "BB"]]
+    missing_cols = [c for c in metric_side_type_cols if c not in chart4.columns]
+    for col in missing_cols:
+        chart4[col] = np.nan
+
     chart4[metric_side_type_cols] = chart4[metric_side_type_cols].apply(pd.to_numeric, errors="coerce")
 
     # Make sure correct team is assigned
-    team_lookup = df.groupby('batter')['batting_team'].first().rename('team')  
+    team_lookup = y.groupby('batter')['team'].first().rename('team')  
     chart4 = chart4.merge(team_lookup, on='batter', how='left')
 
-    # Define SD-related percentages for each possible combo
-    for side in ["R", "L"]:
-        for group in ["FA", "OFF", "BB"]:
-            suffix1 = f"vs {side}HP {group}"
-            suffix2 = f"{side}_{group}"
-            chart4[f"iz% {suffix1}"] = round(chart4[f"strike_swing_{suffix2}"] / (chart4[f"strike_swing_{suffix2}"] + chart4[f"strike_taken_{suffix2}"]) * 100, 1)
-            chart4[f"ooz% {suffix1}"] = round(chart4[f"ball_taken_{suffix2}"] / (chart4[f"ball_swing_{suffix2}"] + chart4[f"ball_taken_{suffix2}"]) * 100, 1)
-            chart4[f"sd% {suffix1}"] = round(chart4[f"correct_sd_{suffix2}"] / chart4[f"total_{suffix2}"] * 100, 1)
+    query2 = """
+        SELECT
+            * EXCLUDE (
+                iz_raw_R_FA, iz_raw_L_FA, iz_raw_R_OFF, iz_raw_L_OFF, iz_raw_R_BB, iz_raw_L_BB,
+                ooz_raw_R_FA, ooz_raw_L_FA, ooz_raw_R_OFF, ooz_raw_L_OFF, ooz_raw_R_BB, ooz_raw_L_BB,
+                sd_raw_R_FA, sd_raw_L_FA, sd_raw_R_OFF, sd_raw_L_OFF, sd_raw_R_BB, sd_raw_L_BB
+            ),
+            ROUND(iz_raw_R_FA, 1) AS "iz% vs RHP FA",
+            ROUND(iz_raw_L_FA, 1) AS "iz% vs LHP FA",
+            ROUND(iz_raw_R_OFF, 1) AS "iz% vs RHP OFF",
+            ROUND(iz_raw_L_OFF, 1) AS "iz% vs LHP OFF",
+            ROUND(iz_raw_R_BB, 1) AS "iz% vs RHP BB",
+            ROUND(iz_raw_L_BB, 1) AS "iz% vs LHP BB",
+            ROUND(ooz_raw_R_FA, 1) AS "ooz% vs RHP FA",
+            ROUND(ooz_raw_L_FA, 1) AS "ooz% vs LHP FA",
+            ROUND(ooz_raw_R_OFF, 1) AS "ooz% vs RHP OFF",
+            ROUND(ooz_raw_L_OFF, 1) AS "ooz% vs LHP OFF",
+            ROUND(ooz_raw_R_BB, 1) AS "ooz% vs RHP BB",
+            ROUND(ooz_raw_L_BB, 1) AS "ooz% vs LHP BB",
+            ROUND(sd_raw_R_FA, 1) AS "sd% vs RHP FA",
+            ROUND(sd_raw_L_FA, 1) AS "sd% vs LHP FA",
+            ROUND(sd_raw_R_OFF, 1) AS "sd% vs RHP OFF",
+            ROUND(sd_raw_L_OFF, 1) AS "sd% vs LHP OFF",
+            ROUND(sd_raw_R_BB, 1) AS "sd% vs RHP BB",
+            ROUND(sd_raw_L_BB, 1) AS "sd% vs LHP BB",
+            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY iz_raw_R_FA) * 100) ELSE NULL END AS "iz vs RHP FA",
+            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY ooz_raw_R_FA) * 100) ELSE NULL END AS "ooz vs RHP FA",
+            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY sd_raw_R_FA) * 100) ELSE NULL END AS "sd vs RHP FA",
+            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY iz_raw_L_FA) * 100) ELSE NULL END AS "iz vs LHP FA",
+            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY ooz_raw_L_FA) * 100) ELSE NULL END AS "ooz vs LHP FA",
+            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY sd_raw_L_FA) * 100) ELSE NULL END AS "sd vs LHP FA",
+            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY iz_raw_R_OFF) * 100) ELSE NULL END AS "iz vs RHP OFF",
+            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY ooz_raw_R_OFF) * 100) ELSE NULL END AS "ooz vs RHP OFF",
+            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY sd_raw_R_OFF) * 100) ELSE NULL END AS "sd vs RHP OFF",
+            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY iz_raw_L_OFF) * 100) ELSE NULL END AS "iz vs LHP OFF",
+            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY ooz_raw_L_OFF) * 100) ELSE NULL END AS "ooz vs LHP OFF",
+            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY sd_raw_L_OFF) * 100) ELSE NULL END AS "sd vs LHP OFF",
+            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY iz_raw_R_BB) * 100) ELSE NULL END AS "iz vs RHP BB",
+            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY ooz_raw_R_BB) * 100) ELSE NULL END AS "ooz vs RHP BB",
+            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY sd_raw_R_BB) * 100) ELSE NULL END AS "sd vs RHP BB",
+            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY iz_raw_L_BB) * 100) ELSE NULL END AS "iz vs LHP BB",
+            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY ooz_raw_L_BB) * 100) ELSE NULL END AS "ooz vs LHP BB",
+            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY sd_raw_L_BB) * 100) ELSE NULL END AS "sd vs LHP BB"
+        FROM (
+            SELECT
+                *,
+                strike_swing_R_FA * 100.0 / NULLIF(strike_swing_R_FA + strike_taken_R_FA, 0) AS iz_raw_R_FA,
+                strike_swing_L_FA * 100.0 / NULLIF(strike_swing_L_FA + strike_taken_L_FA, 0) AS iz_raw_L_FA,
+                strike_swing_R_OFF * 100.0 / NULLIF(strike_swing_R_OFF + strike_taken_R_OFF, 0) AS iz_raw_R_OFF,
+                strike_swing_L_OFF * 100.0 / NULLIF(strike_swing_L_OFF + strike_taken_L_OFF, 0) AS iz_raw_L_OFF,
+                strike_swing_R_BB * 100.0 / NULLIF(strike_swing_R_BB + strike_taken_R_BB, 0) AS iz_raw_R_BB,
+                strike_swing_L_BB * 100.0 / NULLIF(strike_swing_L_BB + strike_taken_L_BB, 0) AS iz_raw_L_BB,
+                ball_taken_R_FA * 100.0 / NULLIF(ball_swing_R_FA + ball_taken_R_FA, 0) AS ooz_raw_R_FA,
+                ball_taken_L_FA * 100.0 / NULLIF(ball_swing_L_FA + ball_taken_L_FA, 0) AS ooz_raw_L_FA,
+                ball_taken_R_OFF * 100.0 / NULLIF(ball_swing_R_OFF + ball_taken_R_OFF, 0) AS ooz_raw_R_OFF,
+                ball_taken_L_OFF * 100.0 / NULLIF(ball_swing_L_OFF + ball_taken_L_OFF, 0) AS ooz_raw_L_OFF,
+                ball_taken_R_BB * 100.0 / NULLIF(ball_swing_R_BB + ball_taken_R_BB, 0) AS ooz_raw_R_BB,
+                ball_taken_L_BB * 100.0 / NULLIF(ball_swing_L_BB + ball_taken_L_BB, 0) AS ooz_raw_L_BB,
+                correct_sd_R_FA * 100.0 / NULLIF(pitches_R_FA, 0) AS sd_raw_R_FA,
+                correct_sd_L_FA * 100.0 / NULLIF(pitches_L_FA, 0) AS sd_raw_L_FA,
+                correct_sd_R_OFF * 100.0 / NULLIF(pitches_R_OFF, 0) AS sd_raw_R_OFF,
+                correct_sd_L_OFF * 100.0 / NULLIF(pitches_L_OFF, 0) AS sd_raw_L_OFF,
+                correct_sd_R_BB * 100.0 / NULLIF(pitches_R_BB, 0) AS sd_raw_R_BB,
+                correct_sd_L_BB * 100.0 / NULLIF(pitches_L_BB, 0) AS sd_raw_L_BB
+            FROM chart4
+        )
+    """
 
-    # Get percentiles for each SD metric
-    for side in ["R", "L"]:
-        for group in ["FA", "OFF", "BB"]:
-            eligible = chart4[f"total_{side}_{group}"] >= 50
-            chart4[f"iz vs {side}HP {group}"] = round(chart4.loc[eligible, f"iz% vs {side}HP {group}"].rank(pct=True) * 100)
-            chart4[f"ooz vs {side}HP {group}"] = round(chart4.loc[eligible, f"ooz% vs {side}HP {group}"].rank(pct=True) * 100)
-            chart4[f"sd vs {side}HP {group}"] = round(chart4.loc[eligible, f"sd% vs {side}HP {group}"].rank(pct=True) * 100)
+    chart4 = duckdb.sql(query2).df()
 
-    # Only include columns of interest
-    chart4 = chart4[['batter', 'player', 'bats', 'team', 'PA', 
+    chart4["pitches"] = round(
+        chart4["pitches_R_FA"]
+        .add(chart4["pitches_L_FA"], fill_value=0)
+        .add(chart4["pitches_R_OFF"], fill_value=0)
+        .add(chart4["pitches_L_OFF"], fill_value=0)
+        .add(chart4["pitches_R_BB"], fill_value=0)
+        .add(chart4["pitches_L_BB"], fill_value=0)
+    )
+
+
+    chart4 = chart4[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
                      'iz% vs RHP FA', 'ooz% vs RHP FA', 'sd% vs RHP FA', 
-                     'iz% vs LHP FA', 'ooz% vs LHP FA', 'sd% vs LHP FA', 
                      'iz% vs RHP OFF', 'ooz% vs RHP OFF', 'sd% vs RHP OFF', 
-                     'iz% vs LHP OFF', 'ooz% vs LHP OFF', 'sd% vs LHP OFF', 
-                     'iz% vs RHP BB', 'ooz% vs RHP BB', 'sd% vs RHP BB', 
-                     'iz% vs LHP BB', 'ooz% vs LHP BB', 'sd% vs LHP BB',
+                     'iz% vs RHP BB', 'ooz% vs RHP BB', 'sd% vs RHP BB',
                      'iz vs RHP FA', 'ooz vs RHP FA', 'sd vs RHP FA', 
+                     'iz vs RHP OFF', 'ooz vs RHP OFF', 'sd vs RHP OFF',
+                     'iz vs RHP BB', 'ooz vs RHP BB', 'sd vs RHP BB',
+                     'iz% vs LHP FA', 'ooz% vs LHP FA', 'sd% vs LHP FA', 
+                     'iz% vs LHP OFF', 'ooz% vs LHP OFF', 'sd% vs LHP OFF', 
+                     'iz% vs LHP BB', 'ooz% vs LHP BB', 'sd% vs LHP BB',
                      'iz vs LHP FA', 'ooz vs LHP FA', 'sd vs LHP FA', 
-                     'iz vs RHP OFF', 'ooz vs RHP OFF', 'sd vs RHP OFF', 
-                     'iz vs LHP OFF', 'ooz vs LHP OFF', 'sd vs LHP OFF', 
-                     'iz vs RHP BB', 'ooz vs RHP BB', 'sd vs RHP BB', 
-                     'iz vs LHP BB', 'ooz vs LHP BB', 'sd vs LHP BB'
-                    ]]
-
-    # Sort by PA
+                     'iz vs LHP OFF', 'ooz vs LHP OFF', 'sd vs LHP OFF',
+                     'iz vs LHP BB', 'ooz vs LHP BB', 'sd vs LHP BB']]
+    
     chart4 = chart4.sort_values("PA", ascending=False)
-
-    # Return updated df
     return chart4
+
+# This function builds a where clause for our sql queries
+def build_where_clause(count, outs, bases, phand, pitch_type):
+    conditions = []
+
+    if count:
+        formatted = ", ".join(f"'{c}'" for c in count)
+        conditions.append(f'"count" IN ({formatted})')
+
+    if outs:
+        formatted = ", ".join(str(o) for o in outs)
+        conditions.append(f"outs_when_up IN ({formatted})")
+
+    if bases:
+        if "first" in bases:
+            conditions.append("on_1b IS NOT NULL")
+        if "second" in bases:
+            conditions.append("on_2b IS NOT NULL")
+        if "third" in bases:
+            conditions.append("on_3b IS NOT NULL")
+        if "not first" in bases:
+            conditions.append("on_1b IS NULL")
+        if "not second" in bases:
+            conditions.append("on_2b IS NULL")
+        if "not third" in bases:
+            conditions.append("on_3b IS NULL")
+        if "risp" in bases:
+            conditions.append("(on_2b IS NOT NULL OR on_3b IS NOT NULL)")
+        if "bases empty" in bases:
+            conditions.append("(on_1b IS NULL AND on_2b IS NULL AND on_3b IS NULL)")
+
+    if phand:
+        conditions.append(f"p_throws = '{phand}'")
+
+    if pitch_type:
+        formatted = ", ".join(f"'{p}'" for p in pitch_type)
+        conditions.append(f"pitch_type IN ({formatted})")
+
+    if not conditions:
+        return "1=1"
+    return " AND ".join(conditions)
 
 label_style = {"fontSize": "12px", "fontWeight": "normal", "color": "#4d4d4d", "marginBottom": "4px", "marginLeft": "4px", "display": "block"}
 
@@ -596,149 +769,86 @@ app.layout = html.Div([
     Input("pa", "value")
 )
 def update_table(count, outs, bases, phand, pitch_type, split, style, view, team, hand, pa):
-    x = df.copy()
-
-    # Customize counts to be included
-    if count:
-        x = x[x["count"].isin(count)]
-
-    # Customize outs to be included
-    if outs:
-        x = x[x["outs_when_up"].isin(outs)]
-
-    # Customize base runner situations to be included
-    if bases:
-        mask = pd.Series(True, index=x.index)
-        if "first" in bases:
-            mask &= x["on_1b"].notna()
-        if "second" in bases:
-            mask &= x["on_2b"].notna()
-        if "third" in bases:
-            mask &= x["on_3b"].notna()
-        if "not first" in bases:
-            mask &= x["on_1b"].isna()
-        if "not second" in bases:
-            mask &= x["on_2b"].isna()
-        if "not third" in bases:
-            mask &= x["on_3b"].isna()
-        if "risp" in bases:
-            mask &= x["on_2b"].notna() | x["on_3b"].notna()
-        if "bases empty" in bases:
-            mask &= x["on_1b"].isna() & x["on_2b"].isna() & x["on_3b"].isna()
-        x = x[mask]
-
-    # Customize opposing pitcher handedness to be included
-    if phand:
-        x = x[x["p_throws"] == phand]
-
-    # Customize pitch type(s) to be included
-    if pitch_type:
-        x = x[x["pitch_type"].isin(pitch_type)]
 
     # Default view
     if split == "default":
-        result = default(x)
+        result = default(count, outs, bases, phand, pitch_type)
 
-        # Simple view
         if style == "simple":
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "sd"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "sd%"]]
-        # Detailed view    
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd%"]]
         else:
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "iz", "ooz", "sd"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz", "ooz", "sd"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "iz%", "ooz%", "sd%"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz%", "ooz%", "sd%"]]
 
-    
     # Split by pitcher hand
     elif split == "pitcher_hand":
-        result = pitcher_hand(x)
+        result = pitcher_hand(count, outs, bases, phand, pitch_type)
 
-        # Simple view
         if style == "simple":
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "sd vs RHP", "sd vs LHP"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd vs RHP", "sd vs LHP"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "sd% vs RHP", "sd% vs LHP"]]
-        # Detailed view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd% vs RHP", "sd% vs LHP"]]
         else:
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "iz vs RHP", "ooz vs RHP", "sd vs RHP", "iz vs LHP", "ooz vs LHP", "sd vs LHP"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz vs RHP", "ooz vs RHP", "sd vs RHP", "iz vs LHP", "ooz vs LHP", "sd vs LHP"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "iz% vs RHP", "ooz% vs RHP", "sd% vs RHP", "iz% vs LHP", "ooz% vs LHP", "sd% vs LHP"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz% vs RHP", "ooz% vs RHP", "sd% vs RHP", "iz% vs LHP", "ooz% vs LHP", "sd% vs LHP"]]
 
     # Split by pitch group
     elif split == "pitch_group":
-        result = pitch_group(x)
+        result = pitch_group(count, outs, bases, phand, pitch_type)
 
-        # Simple view
         if style == "simple":
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "sd vs FA", "sd vs OFF", "sd vs BB"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd vs FA", "sd vs OFF", "sd vs BB"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "sd% vs FA", "sd% vs OFF", "sd% vs BB"]]
-        # Detailed view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd% vs FA", "sd% vs OFF", "sd% vs BB"]]
         else:
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", 
+                result = result[["batter", "player", "bats", "team", "PA", "pitches",
                                  "iz vs FA", "ooz vs FA", "sd vs FA",
                                  "iz vs OFF", "ooz vs OFF", "sd vs OFF",
                                  "iz vs BB", "ooz vs BB", "sd vs BB"]]
-            # Standard view
             else:
-                result = result[["batter", "player", "bats", "team", "PA",
-                                 "iz% vs FA", "ooz% vs FA", "sd% vs FA", 
-                                 "iz% vs OFF", "ooz% vs OFF", "sd% vs OFF", 
+                result = result[["batter", "player", "bats", "team", "PA", "pitches",
+                                 "iz% vs FA", "ooz% vs FA", "sd% vs FA",
+                                 "iz% vs OFF", "ooz% vs OFF", "sd% vs OFF",
                                  "iz% vs BB", "ooz% vs BB", "sd% vs BB"]]
 
     # Split by pitcher hand + pitch group
     elif split == "hand_group":
-        result = hand_group(x)
+        result = hand_group(count, outs, bases, phand, pitch_type)
 
-        # Simple view
         if style == "simple":
-            # Percentile view
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "sd vs RHP FA", "sd vs LHP FA", "sd vs RHP OFF", "sd vs LHP OFF", "sd vs RHP BB", "sd vs LHP BB"]]
-            # Standard view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd vs RHP FA", "sd vs LHP FA", "sd vs RHP OFF", "sd vs LHP OFF", "sd vs RHP BB", "sd vs LHP BB"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "sd% vs RHP FA", "sd% vs LHP FA", "sd% vs RHP OFF", "sd% vs LHP OFF", "sd% vs RHP BB", "sd% vs LHP BB"]]
-        # Detailed view
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd% vs RHP FA", "sd% vs LHP FA", "sd% vs RHP OFF", "sd% vs LHP OFF", "sd% vs RHP BB", "sd% vs LHP BB"]]
         else:
-            # Percentile view
             if view == "percentile":
                 result = result[[
-                    "batter", "player", "bats", "team", "PA",
-                    "iz vs RHP FA", "ooz vs RHP FA", "sd vs RHP FA", 
-                    "iz vs LHP FA", "ooz vs LHP FA", "sd vs LHP FA", 
-                    "iz vs RHP OFF", "ooz vs RHP OFF", "sd vs RHP OFF", 
-                    "iz vs LHP OFF", "ooz vs LHP OFF", "sd vs LHP OFF", 
-                    "iz vs RHP BB", "ooz vs RHP BB", "sd vs RHP BB", 
+                    "batter", "player", "bats", "team", "PA", "pitches",
+                    "iz vs RHP FA", "ooz vs RHP FA", "sd vs RHP FA",
+                    "iz vs LHP FA", "ooz vs LHP FA", "sd vs LHP FA",
+                    "iz vs RHP OFF", "ooz vs RHP OFF", "sd vs RHP OFF",
+                    "iz vs LHP OFF", "ooz vs LHP OFF", "sd vs LHP OFF",
+                    "iz vs RHP BB", "ooz vs RHP BB", "sd vs RHP BB",
                     "iz vs LHP BB", "ooz vs LHP BB", "sd vs LHP BB"
                 ]]
-            # Standard view
             else:
                 result = result[[
-                    "batter", "player", "bats", "team", "PA",
-                    "iz% vs RHP FA", "ooz% vs RHP FA", "sd% vs RHP FA", 
-                    "iz% vs LHP FA", "ooz% vs LHP FA", "sd% vs LHP FA", 
-                    "iz% vs RHP OFF", "ooz% vs RHP OFF", "sd% vs RHP OFF", 
-                    "iz% vs LHP OFF", "ooz% vs LHP OFF", "sd% vs LHP OFF", 
-                    "iz% vs RHP BB", "ooz% vs RHP BB", "sd% vs RHP BB", 
+                    "batter", "player", "bats", "team", "PA", "pitches",
+                    "iz% vs RHP FA", "ooz% vs RHP FA", "sd% vs RHP FA",
+                    "iz% vs LHP FA", "ooz% vs LHP FA", "sd% vs LHP FA",
+                    "iz% vs RHP OFF", "ooz% vs RHP OFF", "sd% vs RHP OFF",
+                    "iz% vs LHP OFF", "ooz% vs LHP OFF", "sd% vs LHP OFF",
+                    "iz% vs RHP BB", "ooz% vs RHP BB", "sd% vs RHP BB",
                     "iz% vs LHP BB", "ooz% vs LHP BB", "sd% vs LHP BB"
                 ]]
 
@@ -753,16 +863,6 @@ def update_table(count, outs, bases, phand, pitch_type, split, style, view, team
     # PA minimum filter
     if pa:
         result = result[result["PA"] >= pa]
-
-    # Add pitch count column only when a customization is applied
-    if count or outs or bases or phand or pitch_type:
-        pitch_counts = x.groupby("batter").size().rename("pitches")
-        result = result.merge(pitch_counts, left_on="batter", right_index=True, how="left")
-
-        cols = result.columns.tolist()
-        cols.remove("pitches")
-        cols.insert(5, "pitches")
-        result = result[cols]
 
     # Drop ID from final result
     result = result.drop(columns=['batter'])
