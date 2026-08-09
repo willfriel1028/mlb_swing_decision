@@ -618,7 +618,7 @@ app.layout = html.Div([
             html.Label("PA Minimum", style=label_style),
             dcc.Dropdown(
                 id="pa",
-                options = [{"label": str(n), "value": n} for n in range(0, 450, 50)],
+                options = [{"label": str(n), "value": n} for n in range(0, 550, 50)],
                 placeholder="Choose",
                 style={"width": "200px"}
             ),
