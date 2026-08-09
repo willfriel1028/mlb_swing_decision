@@ -559,17 +559,6 @@ app.layout = html.Div([
             ),
         ]),
 
-        # Dropdown option to select a team
-        html.Div([
-            html.Label("Team", style=label_style),
-            dcc.Dropdown(
-                id="team",
-                options=[{"label": t, "value": t} for t in sorted(df["batting_team"].unique())],
-                placeholder="Choose",
-                style={"width": "200px"}
-            ),
-        ]),
-
         # Dropdown option to select style mode
         html.Div([
             html.Label("Style", style=label_style),
@@ -594,6 +583,17 @@ app.layout = html.Div([
                     {"label": "Percentile", "value": "percentile"},
                 ],
                 value="standard",
+                style={"width": "200px"}
+            ),
+        ]),
+
+        # Dropdown option to select a team
+        html.Div([
+            html.Label("Team", style=label_style),
+            dcc.Dropdown(
+                id="team",
+                options=[{"label": t, "value": t} for t in sorted(df["batting_team"].unique())],
+                placeholder="Choose",
                 style={"width": "200px"}
             ),
         ]),
