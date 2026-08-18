@@ -48,7 +48,7 @@ def default(count=None, outs=None, bases=None, phand=None, pitch_type=None):
                 SUM(ball_taken) AS ball_taken,
                 COUNT(*) AS pitches,
                 SUM(strike_swing) * 100.0 / (SUM(strike_swing) + SUM(strike_taken)) AS iz_raw,
-                SUM(ball_taken) * 100.0 / (SUM(ball_taken) + SUM(ball_swing)) AS ooz_raw,
+                SUM(ball_swing) * 100.0 / (SUM(ball_taken) + SUM(ball_swing)) AS ooz_raw,
                 SUM(correct_sd) * 100.0 / COUNT(*) AS sd_raw
             FROM 'season_data.parquet'
             WHERE {where_clause}
@@ -56,16 +56,16 @@ def default(count=None, outs=None, bases=None, phand=None, pitch_type=None):
         )
         SELECT
             * EXCLUDE (iz_raw, ooz_raw, sd_raw),
-            ROUND(iz_raw, 1) AS "iz%",
-            ROUND(ooz_raw, 1) AS "ooz%",
+            ROUND(iz_raw, 1) AS "z-swing%",
+            ROUND(ooz_raw, 1) AS "o-swing%",
             ROUND(sd_raw, 1) AS "sd%",
-            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY iz_raw) * 100) ELSE NULL END AS iz,
-            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY ooz_raw) * 100) ELSE NULL END AS ooz,
+            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY iz_raw) * 100) ELSE NULL END AS "z-swing",
+            CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY ooz_raw DESC) * 100) ELSE NULL END AS "o-swing",
             CASE WHEN pitches >= 150 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches >= 150 ORDER BY sd_raw) * 100) ELSE NULL END AS sd
         FROM agg
     """
     chart1 = duckdb.sql(query).df()
-    chart1 = chart1[["batter", "player", "bats", "team", "PA", "pitches", "iz%", "iz", "ooz%", "ooz", "sd%", "sd"]]
+    chart1 = chart1[["batter", "player", "bats", "team", "PA", "pitches", "z-swing%", "z-swing", "o-swing%", "o-swing", "sd%", "sd"]]
     chart1 = chart1.sort_values("PA", ascending=False)
     return chart1
 
@@ -120,16 +120,16 @@ def pitcher_hand(count=None, outs=None, bases=None, phand=None, pitch_type=None)
     query2 = """
         SELECT
             * EXCLUDE (iz_raw_R, iz_raw_L, ooz_raw_R, ooz_raw_L, sd_raw_R, sd_raw_L),
-            ROUND(iz_raw_R, 1) AS "iz% vs RHP",
-            ROUND(iz_raw_L, 1) AS "iz% vs LHP",
-            ROUND(ooz_raw_R, 1) AS "ooz% vs RHP",
-            ROUND(ooz_raw_L, 1) AS "ooz% vs LHP",
+            ROUND(iz_raw_R, 1) AS "z-swing% vs RHP",
+            ROUND(iz_raw_L, 1) AS "z-swing% vs LHP",
+            ROUND(ooz_raw_R, 1) AS "o-swing% vs RHP",
+            ROUND(ooz_raw_L, 1) AS "o-swing% vs LHP",
             ROUND(sd_raw_R, 1) AS "sd% vs RHP",
             ROUND(sd_raw_L, 1) AS "sd% vs LHP",
-            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY iz_raw_R) * 100) ELSE NULL END AS "iz vs RHP",
-            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY iz_raw_L) * 100) ELSE NULL END AS "iz vs LHP",
-            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY ooz_raw_R) * 100) ELSE NULL END AS "ooz vs RHP",
-            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY ooz_raw_L) * 100) ELSE NULL END AS "ooz vs LHP",
+            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY iz_raw_R) * 100) ELSE NULL END AS "z-swing vs RHP",
+            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY iz_raw_L) * 100) ELSE NULL END AS "z-swing vs LHP",
+            CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY ooz_raw_R DESC) * 100) ELSE NULL END AS "o-swing vs RHP",
+            CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY ooz_raw_L DESC) * 100) ELSE NULL END AS "o-swing vs LHP",
             CASE WHEN pitches_R >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R >= 100 ORDER BY sd_raw_R) * 100) ELSE NULL END AS "sd vs RHP",
             CASE WHEN pitches_L >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L >= 100 ORDER BY sd_raw_L) * 100) ELSE NULL END AS "sd vs LHP"
         FROM (
@@ -137,8 +137,8 @@ def pitcher_hand(count=None, outs=None, bases=None, phand=None, pitch_type=None)
                 *,
                 strike_swing_R * 100.0 / NULLIF(strike_swing_R + strike_taken_R, 0) AS iz_raw_R,
                 strike_swing_L * 100.0 / NULLIF(strike_swing_L + strike_taken_L, 0) AS iz_raw_L,
-                ball_taken_R * 100.0 / NULLIF(ball_taken_R + ball_swing_R, 0) AS ooz_raw_R,
-                ball_taken_L * 100.0 / NULLIF(ball_taken_L + ball_swing_L, 0) AS ooz_raw_L,
+                ball_swing_R * 100.0 / NULLIF(ball_taken_R + ball_swing_R, 0) AS ooz_raw_R,
+                ball_swing_L * 100.0 / NULLIF(ball_taken_L + ball_swing_L, 0) AS ooz_raw_L,
                 correct_sd_R * 100.0 / NULLIF(pitches_R, 0) AS sd_raw_R,
                 correct_sd_L * 100.0 / NULLIF(pitches_L, 0) AS sd_raw_L
             FROM chart2
@@ -149,10 +149,10 @@ def pitcher_hand(count=None, outs=None, bases=None, phand=None, pitch_type=None)
     chart2["pitches"] = round(chart2["pitches_R"].add(chart2["pitches_L"], fill_value=0))
 
     chart2 = chart2[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
-                     'iz% vs RHP', 'ooz% vs RHP', 'sd% vs RHP', 
-                     'iz% vs LHP', 'ooz% vs LHP', 'sd% vs LHP', 
-                     'iz vs RHP', 'ooz vs RHP', 'sd vs RHP', 
-                     'iz vs LHP', 'ooz vs LHP', 'sd vs LHP']]
+                     'z-swing% vs RHP', 'o-swing% vs RHP', 'sd% vs RHP', 
+                     'z-swing% vs LHP', 'o-swing% vs LHP', 'sd% vs LHP', 
+                     'z-swing vs RHP', 'o-swing vs RHP', 'sd vs RHP', 
+                     'z-swing vs LHP', 'o-swing vs LHP', 'sd vs LHP']]
     chart2 = chart2.sort_values("PA", ascending=False)
     return chart2
 
@@ -207,23 +207,23 @@ def pitch_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
     query2 = """
         SELECT
             * EXCLUDE (iz_raw_FA, iz_raw_OFF, iz_raw_BB, ooz_raw_FA, ooz_raw_OFF, ooz_raw_BB, sd_raw_FA, sd_raw_OFF, sd_raw_BB),
-            ROUND(iz_raw_FA, 1) AS "iz% vs FA",
-            ROUND(iz_raw_OFF, 1) AS "iz% vs OFF",
-            ROUND(iz_raw_BB, 1) AS "iz% vs BB",
-            ROUND(ooz_raw_FA, 1) AS "ooz% vs FA",
-            ROUND(ooz_raw_OFF, 1) AS "ooz% vs OFF",
-            ROUND(ooz_raw_BB, 1) AS "ooz% vs BB",
+            ROUND(iz_raw_FA, 1) AS "z-swing% vs FA",
+            ROUND(iz_raw_OFF, 1) AS "z-swing% vs OFF",
+            ROUND(iz_raw_BB, 1) AS "z-swing% vs BB",
+            ROUND(ooz_raw_FA, 1) AS "o-swing% vs FA",
+            ROUND(ooz_raw_OFF, 1) AS "o-swing% vs OFF",
+            ROUND(ooz_raw_BB, 1) AS "o-swing% vs BB",
             ROUND(sd_raw_FA, 1) AS "sd% vs FA",
             ROUND(sd_raw_OFF, 1) AS "sd% vs OFF",
             ROUND(sd_raw_BB, 1) AS "sd% vs BB",
-            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY iz_raw_FA) * 100) ELSE NULL END AS "iz vs FA",
-            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY ooz_raw_FA) * 100) ELSE NULL END AS "ooz vs FA",
+            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY iz_raw_FA) * 100) ELSE NULL END AS "z-swing vs FA",
+            CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY ooz_raw_FA DESC) * 100) ELSE NULL END AS "o-swing vs FA",
             CASE WHEN pitches_FA >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_FA >= 100 ORDER BY sd_raw_FA) * 100) ELSE NULL END AS "sd vs FA",
-            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY iz_raw_OFF) * 100) ELSE NULL END AS "iz vs OFF",
-            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY ooz_raw_OFF) * 100) ELSE NULL END AS "ooz vs OFF",
+            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY iz_raw_OFF) * 100) ELSE NULL END AS "z-swing vs OFF",
+            CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY ooz_raw_OFF DESC) * 100) ELSE NULL END AS "o-swing vs OFF",
             CASE WHEN pitches_OFF >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_OFF >= 100 ORDER BY sd_raw_OFF) * 100) ELSE NULL END AS "sd vs OFF",
-            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY iz_raw_BB) * 100) ELSE NULL END AS "iz vs BB",
-            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY ooz_raw_BB) * 100) ELSE NULL END AS "ooz vs BB",
+            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY iz_raw_BB) * 100) ELSE NULL END AS "z-swing vs BB",
+            CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY ooz_raw_BB DESC) * 100) ELSE NULL END AS "o-swing vs BB",
             CASE WHEN pitches_BB >= 100 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_BB >= 100 ORDER BY sd_raw_BB) * 100) ELSE NULL END AS "sd vs BB",
         FROM (
             SELECT
@@ -231,9 +231,9 @@ def pitch_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
                 strike_swing_FA * 100.0 / NULLIF(strike_swing_FA + strike_taken_FA, 0) AS iz_raw_FA,
                 strike_swing_OFF * 100.0 / NULLIF(strike_swing_OFF + strike_taken_OFF, 0) AS iz_raw_OFF,
                 strike_swing_BB * 100.0 / NULLIF(strike_swing_BB + strike_taken_BB, 0) AS iz_raw_BB,
-                ball_taken_FA * 100.0 / NULLIF(ball_swing_FA + ball_taken_FA, 0) AS ooz_raw_FA,
-                ball_taken_OFF * 100.0 / NULLIF(ball_swing_OFF + ball_taken_OFF, 0) AS ooz_raw_OFF,
-                ball_taken_BB * 100.0 / NULLIF(ball_swing_BB + ball_taken_BB, 0) AS ooz_raw_BB,
+                ball_swing_FA * 100.0 / NULLIF(ball_swing_FA + ball_taken_FA, 0) AS ooz_raw_FA,
+                ball_swing_OFF * 100.0 / NULLIF(ball_swing_OFF + ball_taken_OFF, 0) AS ooz_raw_OFF,
+                ball_swing_BB * 100.0 / NULLIF(ball_swing_BB + ball_taken_BB, 0) AS ooz_raw_BB,
                 correct_sd_FA * 100.0 / NULLIF(pitches_FA, 0) AS sd_raw_FA,
                 correct_sd_OFF * 100.0 / NULLIF(pitches_OFF, 0) AS sd_raw_OFF,
                 correct_sd_BB * 100.0 / NULLIF(pitches_BB, 0) AS sd_raw_BB,
@@ -249,12 +249,12 @@ def pitch_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
     )
 
     chart3 = chart3[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
-                     'iz% vs FA', 'ooz% vs FA', 'sd% vs FA', 
-                     'iz% vs OFF', 'ooz% vs OFF', 'sd% vs OFF', 
-                     'iz% vs BB', 'ooz% vs BB', 'sd% vs BB',
-                     'iz vs FA', 'ooz vs FA', 'sd vs FA', 
-                     'iz vs OFF', 'ooz vs OFF', 'sd vs OFF',
-                     'iz vs BB', 'ooz vs BB', 'sd vs BB']]
+                     'z-swing% vs FA', 'o-swing% vs FA', 'sd% vs FA', 
+                     'z-swing% vs OFF', 'o-swing% vs OFF', 'sd% vs OFF', 
+                     'z-swing% vs BB', 'o-swing% vs BB', 'sd% vs BB',
+                     'z-swing vs FA', 'o-swing vs FA', 'sd vs FA', 
+                     'z-swing vs OFF', 'o-swing vs OFF', 'sd vs OFF',
+                     'z-swing vs BB', 'o-swing vs BB', 'sd vs BB']]
     chart3 = chart3.sort_values("PA", ascending=False)
     return chart3
 
@@ -316,41 +316,41 @@ def hand_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
                 ooz_raw_R_FA, ooz_raw_L_FA, ooz_raw_R_OFF, ooz_raw_L_OFF, ooz_raw_R_BB, ooz_raw_L_BB,
                 sd_raw_R_FA, sd_raw_L_FA, sd_raw_R_OFF, sd_raw_L_OFF, sd_raw_R_BB, sd_raw_L_BB
             ),
-            ROUND(iz_raw_R_FA, 1) AS "iz% vs RHP FA",
-            ROUND(iz_raw_L_FA, 1) AS "iz% vs LHP FA",
-            ROUND(iz_raw_R_OFF, 1) AS "iz% vs RHP OFF",
-            ROUND(iz_raw_L_OFF, 1) AS "iz% vs LHP OFF",
-            ROUND(iz_raw_R_BB, 1) AS "iz% vs RHP BB",
-            ROUND(iz_raw_L_BB, 1) AS "iz% vs LHP BB",
-            ROUND(ooz_raw_R_FA, 1) AS "ooz% vs RHP FA",
-            ROUND(ooz_raw_L_FA, 1) AS "ooz% vs LHP FA",
-            ROUND(ooz_raw_R_OFF, 1) AS "ooz% vs RHP OFF",
-            ROUND(ooz_raw_L_OFF, 1) AS "ooz% vs LHP OFF",
-            ROUND(ooz_raw_R_BB, 1) AS "ooz% vs RHP BB",
-            ROUND(ooz_raw_L_BB, 1) AS "ooz% vs LHP BB",
+            ROUND(iz_raw_R_FA, 1) AS "z-swing% vs RHP FA",
+            ROUND(iz_raw_L_FA, 1) AS "z-swing% vs LHP FA",
+            ROUND(iz_raw_R_OFF, 1) AS "z-swing% vs RHP OFF",
+            ROUND(iz_raw_L_OFF, 1) AS "z-swing% vs LHP OFF",
+            ROUND(iz_raw_R_BB, 1) AS "z-swing% vs RHP BB",
+            ROUND(iz_raw_L_BB, 1) AS "z-swing% vs LHP BB",
+            ROUND(ooz_raw_R_FA, 1) AS "o-swing% vs RHP FA",
+            ROUND(ooz_raw_L_FA, 1) AS "o-swing% vs LHP FA",
+            ROUND(ooz_raw_R_OFF, 1) AS "o-swing% vs RHP OFF",
+            ROUND(ooz_raw_L_OFF, 1) AS "o-swing% vs LHP OFF",
+            ROUND(ooz_raw_R_BB, 1) AS "o-swing% vs RHP BB",
+            ROUND(ooz_raw_L_BB, 1) AS "o-swing% vs LHP BB",
             ROUND(sd_raw_R_FA, 1) AS "sd% vs RHP FA",
             ROUND(sd_raw_L_FA, 1) AS "sd% vs LHP FA",
             ROUND(sd_raw_R_OFF, 1) AS "sd% vs RHP OFF",
             ROUND(sd_raw_L_OFF, 1) AS "sd% vs LHP OFF",
             ROUND(sd_raw_R_BB, 1) AS "sd% vs RHP BB",
             ROUND(sd_raw_L_BB, 1) AS "sd% vs LHP BB",
-            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY iz_raw_R_FA) * 100) ELSE NULL END AS "iz vs RHP FA",
-            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY ooz_raw_R_FA) * 100) ELSE NULL END AS "ooz vs RHP FA",
+            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY iz_raw_R_FA) * 100) ELSE NULL END AS "z-swing vs RHP FA",
+            CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY ooz_raw_R_FA DESC) * 100) ELSE NULL END AS "o-swing vs RHP FA",
             CASE WHEN pitches_R_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_FA >= 50 ORDER BY sd_raw_R_FA) * 100) ELSE NULL END AS "sd vs RHP FA",
-            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY iz_raw_L_FA) * 100) ELSE NULL END AS "iz vs LHP FA",
-            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY ooz_raw_L_FA) * 100) ELSE NULL END AS "ooz vs LHP FA",
+            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY iz_raw_L_FA) * 100) ELSE NULL END AS "z-swing vs LHP FA",
+            CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY ooz_raw_L_FA DESC) * 100) ELSE NULL END AS "o-swing vs LHP FA",
             CASE WHEN pitches_L_FA >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_FA >= 50 ORDER BY sd_raw_L_FA) * 100) ELSE NULL END AS "sd vs LHP FA",
-            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY iz_raw_R_OFF) * 100) ELSE NULL END AS "iz vs RHP OFF",
-            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY ooz_raw_R_OFF) * 100) ELSE NULL END AS "ooz vs RHP OFF",
+            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY iz_raw_R_OFF) * 100) ELSE NULL END AS "z-swing vs RHP OFF",
+            CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY ooz_raw_R_OFF DESC) * 100) ELSE NULL END AS "o-swing vs RHP OFF",
             CASE WHEN pitches_R_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_OFF >= 50 ORDER BY sd_raw_R_OFF) * 100) ELSE NULL END AS "sd vs RHP OFF",
-            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY iz_raw_L_OFF) * 100) ELSE NULL END AS "iz vs LHP OFF",
-            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY ooz_raw_L_OFF) * 100) ELSE NULL END AS "ooz vs LHP OFF",
+            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY iz_raw_L_OFF) * 100) ELSE NULL END AS "z-swing vs LHP OFF",
+            CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY ooz_raw_L_OFF DESC) * 100) ELSE NULL END AS "o-swing vs LHP OFF",
             CASE WHEN pitches_L_OFF >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_OFF >= 50 ORDER BY sd_raw_L_OFF) * 100) ELSE NULL END AS "sd vs LHP OFF",
-            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY iz_raw_R_BB) * 100) ELSE NULL END AS "iz vs RHP BB",
-            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY ooz_raw_R_BB) * 100) ELSE NULL END AS "ooz vs RHP BB",
+            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY iz_raw_R_BB) * 100) ELSE NULL END AS "z-swing vs RHP BB",
+            CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY ooz_raw_R_BB DESC) * 100) ELSE NULL END AS "o-swing vs RHP BB",
             CASE WHEN pitches_R_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_R_BB >= 50 ORDER BY sd_raw_R_BB) * 100) ELSE NULL END AS "sd vs RHP BB",
-            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY iz_raw_L_BB) * 100) ELSE NULL END AS "iz vs LHP BB",
-            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY ooz_raw_L_BB) * 100) ELSE NULL END AS "ooz vs LHP BB",
+            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY iz_raw_L_BB) * 100) ELSE NULL END AS "z-swing vs LHP BB",
+            CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY ooz_raw_L_BB DESC) * 100) ELSE NULL END AS "o-swing vs LHP BB",
             CASE WHEN pitches_L_BB >= 50 THEN ROUND(PERCENT_RANK() OVER (PARTITION BY pitches_L_BB >= 50 ORDER BY sd_raw_L_BB) * 100) ELSE NULL END AS "sd vs LHP BB"
         FROM (
             SELECT
@@ -361,12 +361,12 @@ def hand_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
                 strike_swing_L_OFF * 100.0 / NULLIF(strike_swing_L_OFF + strike_taken_L_OFF, 0) AS iz_raw_L_OFF,
                 strike_swing_R_BB * 100.0 / NULLIF(strike_swing_R_BB + strike_taken_R_BB, 0) AS iz_raw_R_BB,
                 strike_swing_L_BB * 100.0 / NULLIF(strike_swing_L_BB + strike_taken_L_BB, 0) AS iz_raw_L_BB,
-                ball_taken_R_FA * 100.0 / NULLIF(ball_swing_R_FA + ball_taken_R_FA, 0) AS ooz_raw_R_FA,
-                ball_taken_L_FA * 100.0 / NULLIF(ball_swing_L_FA + ball_taken_L_FA, 0) AS ooz_raw_L_FA,
-                ball_taken_R_OFF * 100.0 / NULLIF(ball_swing_R_OFF + ball_taken_R_OFF, 0) AS ooz_raw_R_OFF,
-                ball_taken_L_OFF * 100.0 / NULLIF(ball_swing_L_OFF + ball_taken_L_OFF, 0) AS ooz_raw_L_OFF,
-                ball_taken_R_BB * 100.0 / NULLIF(ball_swing_R_BB + ball_taken_R_BB, 0) AS ooz_raw_R_BB,
-                ball_taken_L_BB * 100.0 / NULLIF(ball_swing_L_BB + ball_taken_L_BB, 0) AS ooz_raw_L_BB,
+                ball_swing_R_FA * 100.0 / NULLIF(ball_swing_R_FA + ball_taken_R_FA, 0) AS ooz_raw_R_FA,
+                ball_swing_L_FA * 100.0 / NULLIF(ball_swing_L_FA + ball_taken_L_FA, 0) AS ooz_raw_L_FA,
+                ball_swing_R_OFF * 100.0 / NULLIF(ball_swing_R_OFF + ball_taken_R_OFF, 0) AS ooz_raw_R_OFF,
+                ball_swing_L_OFF * 100.0 / NULLIF(ball_swing_L_OFF + ball_taken_L_OFF, 0) AS ooz_raw_L_OFF,
+                ball_swing_R_BB * 100.0 / NULLIF(ball_swing_R_BB + ball_taken_R_BB, 0) AS ooz_raw_R_BB,
+                ball_swing_L_BB * 100.0 / NULLIF(ball_swing_L_BB + ball_taken_L_BB, 0) AS ooz_raw_L_BB,
                 correct_sd_R_FA * 100.0 / NULLIF(pitches_R_FA, 0) AS sd_raw_R_FA,
                 correct_sd_L_FA * 100.0 / NULLIF(pitches_L_FA, 0) AS sd_raw_L_FA,
                 correct_sd_R_OFF * 100.0 / NULLIF(pitches_R_OFF, 0) AS sd_raw_R_OFF,
@@ -390,18 +390,18 @@ def hand_group(count=None, outs=None, bases=None, phand=None, pitch_type=None):
 
 
     chart4 = chart4[['batter', 'player', 'bats', 'team', 'PA', 'pitches', 
-                     'iz% vs RHP FA', 'ooz% vs RHP FA', 'sd% vs RHP FA', 
-                     'iz% vs RHP OFF', 'ooz% vs RHP OFF', 'sd% vs RHP OFF', 
-                     'iz% vs RHP BB', 'ooz% vs RHP BB', 'sd% vs RHP BB',
-                     'iz vs RHP FA', 'ooz vs RHP FA', 'sd vs RHP FA', 
-                     'iz vs RHP OFF', 'ooz vs RHP OFF', 'sd vs RHP OFF',
-                     'iz vs RHP BB', 'ooz vs RHP BB', 'sd vs RHP BB',
-                     'iz% vs LHP FA', 'ooz% vs LHP FA', 'sd% vs LHP FA', 
-                     'iz% vs LHP OFF', 'ooz% vs LHP OFF', 'sd% vs LHP OFF', 
-                     'iz% vs LHP BB', 'ooz% vs LHP BB', 'sd% vs LHP BB',
-                     'iz vs LHP FA', 'ooz vs LHP FA', 'sd vs LHP FA', 
-                     'iz vs LHP OFF', 'ooz vs LHP OFF', 'sd vs LHP OFF',
-                     'iz vs LHP BB', 'ooz vs LHP BB', 'sd vs LHP BB']]
+                     'z-swing% vs RHP FA', 'o-swing% vs RHP FA', 'sd% vs RHP FA', 
+                     'z-swing% vs RHP OFF', 'o-swing% vs RHP OFF', 'sd% vs RHP OFF', 
+                     'z-swing% vs RHP BB', 'o-swing% vs RHP BB', 'sd% vs RHP BB',
+                     'z-swing vs RHP FA', 'o-swing vs RHP FA', 'sd vs RHP FA', 
+                     'z-swing vs RHP OFF', 'o-swing vs RHP OFF', 'sd vs RHP OFF',
+                     'z-swing vs RHP BB', 'o-swing vs RHP BB', 'sd vs RHP BB',
+                     'z-swing% vs LHP FA', 'o-swing% vs LHP FA', 'sd% vs LHP FA', 
+                     'z-swing% vs LHP OFF', 'o-swing% vs LHP OFF', 'sd% vs LHP OFF', 
+                     'z-swing% vs LHP BB', 'o-swing% vs LHP BB', 'sd% vs LHP BB',
+                     'z-swing vs LHP FA', 'o-swing vs LHP FA', 'sd vs LHP FA', 
+                     'z-swing vs LHP OFF', 'o-swing vs LHP OFF', 'sd vs LHP OFF',
+                     'z-swing vs LHP BB', 'o-swing vs LHP BB', 'sd vs LHP BB']]
     
     chart4 = chart4.sort_values("PA", ascending=False)
     return chart4
@@ -450,39 +450,39 @@ def build_where_clause(count, outs, bases, phand, pitch_type):
 label_style = {"fontSize": "12px", "fontWeight": "normal", "color": "#4d4d4d", "marginBottom": "4px", "marginLeft": "4px", "display": "block"}
 
 col_text = {
-    "iz%": "In-Zone Swing %",
-    "ooz%": "Out-Of-Zone No-Swing %",
+    "z-swing%": "In-Zone Swing %",
+    "o-swing%": "Out-Of-Zone Swing %",
     "sd%": "Overall Swing Decision %",
 
-    "iz% vs RHP": "In-Zone Swing % vs RHP",
-    "iz% vs LHP": "In-Zone Swing % vs LHP",
-    "ooz% vs RHP": "Out-Of-Zone No-Swing % vs RHP",
-    "ooz% vs LHP": "Out-Of-Zone No-Swing % vs LHP",
+    "z-swing% vs RHP": "In-Zone Swing % vs RHP",
+    "z-swing% vs LHP": "In-Zone Swing % vs LHP",
+    "o-swing% vs RHP": "Out-Of-Zone Swing % vs RHP",
+    "o-swing% vs LHP": "Out-Of-Zone Swing % vs LHP",
     "sd% vs RHP": "Swing Decision % vs RHP",
     "sd% vs LHP": "Swing Decision % vs LHP",
 
-    "iz% vs FA": "In-Zone Swing % vs Fastballs",
-    "iz% vs OFF": "In-Zone Swing % vs Offspeed",
-    "iz% vs BB": "In-Zone Swing % vs Breaking Balls",
-    "ooz% vs FA": "Out-Of-Zone No-Swing % vs Fastballs",
-    "ooz% vs OFF": "Out-Of-Zone No-Swing % vs Offspeed",
-    "ooz% vs BB": "Out-Of-Zone No-Swing % vs Breaking Balls",
+    "z-swing% vs FA": "In-Zone Swing % vs Fastballs",
+    "z-swing% vs OFF": "In-Zone Swing % vs Offspeed",
+    "z-swing% vs BB": "In-Zone Swing % vs Breaking Balls",
+    "o-swing% vs FA": "Out-Of-Zone Swing % vs Fastballs",
+    "o-swing% vs OFF": "Out-Of-Zone Swing % vs Offspeed",
+    "o-swing% vs BB": "Out-Of-Zone Swing % vs Breaking Balls",
     "sd% vs FA": "Swing Decision % vs Fastballs",
     "sd% vs OFF": "Swing Decision % vs Offspeed",
     "sd% vs BB": "Swing Decision % vs Breaking Balls",
 
-    "iz% vs RHP FA": "In-Zone Swing % vs RHP Fastballs",
-    "iz% vs LHP FA": "In-Zone Swing % vs LHP Fastballs",
-    "iz% vs RHP OFF": "In-Zone Swing % vs RHP Offspeed",
-    "iz% vs LHP OFF": "In-Zone Swing % vs LHP Offspeed",
-    "iz% vs RHP BB": "In-Zone Swing % vs RHP Breaking Balls",
-    "iz% vs LHP BB": "In-Zone Swing % vs LHP Breaking Balls",
-    "ooz% vs RHP FA": "Out-Of-Zone No-Swing % vs RHP Fastballs",
-    "ooz% vs LHP FA": "Out-Of-Zone No-Swing % vs LHP Fastballs",
-    "ooz% vs RHP OFF": "Out-Of-Zone No-Swing % vs RHP Offspeed",
-    "ooz% vs LHP OFF": "Out-Of-Zone No-Swing % vs LHP Offspeed",
-    "ooz% vs RHP BB": "Out-Of-Zone No-Swing % vs RHP Breaking Balls",
-    "ooz% vs LHP BB": "Out-Of-Zone No-Swing % vs LHP Breaking Balls",
+    "z-swing% vs RHP FA": "In-Zone Swing % vs RHP Fastballs",
+    "z-swing% vs LHP FA": "In-Zone Swing % vs LHP Fastballs",
+    "z-swing% vs RHP OFF": "In-Zone Swing % vs RHP Offspeed",
+    "z-swing% vs LHP OFF": "In-Zone Swing % vs LHP Offspeed",
+    "z-swing% vs RHP BB": "In-Zone Swing % vs RHP Breaking Balls",
+    "z-swing% vs LHP BB": "In-Zone Swing % vs LHP Breaking Balls",
+    "o-swing% vs RHP FA": "Out-Of-Zone Swing % vs RHP Fastballs",
+    "o-swing% vs LHP FA": "Out-Of-Zone Swing % vs LHP Fastballs",
+    "o-swing% vs RHP OFF": "Out-Of-Zone Swing % vs RHP Offspeed",
+    "o-swing% vs LHP OFF": "Out-Of-Zone Swing % vs LHP Offspeed",
+    "o-swing% vs RHP BB": "Out-Of-Zone Swing % vs RHP Breaking Balls",
+    "o-swing% vs LHP BB": "Out-Of-Zone Swing % vs LHP Breaking Balls",
     "sd% vs RHP FA": "Swing Decision % vs RHP Fastballs",
     "sd% vs LHP FA": "Swing Decision % vs LHP Fastballs",
     "sd% vs RHP OFF": "Swing Decision % vs RHP Offspeed",
@@ -490,39 +490,39 @@ col_text = {
     "sd% vs RHP BB": "Swing Decision % vs RHP Breaking Balls",
     "sd% vs LHP BB": "Swing Decision % vs LHP Breaking Balls",
 
-    "iz": "In-Zone Swing Percentile",
-    "ooz": "Out-Of-Zone No-Swing Percentile",
+    "z-swing": "In-Zone Swing Percentile",
+    "o-swing": "Out-Of-Zone Swing Percentile",
     "sd": "Overall Swing Decision Percentile",
     
-    "iz vs RHP": "In-Zone Swing vs RHP Percentile",
-    "iz vs LHP": "In-Zone Swing vs LHP Percentile",
-    "ooz vs RHP": "Out-Of-Zone No-Swing vs RHP Percentile",
-    "ooz vs LHP": "Out-Of-Zone No-Swing vs LHP Percentile",
+    "z-swing vs RHP": "In-Zone Swing vs RHP Percentile",
+    "z-swing vs LHP": "In-Zone Swing vs LHP Percentile",
+    "o-swing vs RHP": "Out-Of-Zone Swing vs RHP Percentile",
+    "o-swing vs LHP": "Out-Of-Zone Swing vs LHP Percentile",
     "sd vs RHP": "Swing Decision vs RHP Percentile",
     "sd vs LHP": "Swing Decision vs LHP Percentile",
     
-    "iz vs FA": "In-Zone Swing vs Fastballs Percentile",
-    "iz vs OFF": "In-Zone Swing vs Offspeed Percentile",
-    "iz vs BB": "In-Zone Swing vs Breaking Balls Percentile",
-    "ooz vs FA": "Out-Of-Zone No-Swing vs Fastballs Percentile",
-    "ooz vs OFF": "Out-Of-Zone No-Swing vs Offspeed Percentile",
-    "ooz vs BB": "Out-Of-Zone No-Swing vs Breaking Balls Percentile",
+    "z-swing vs FA": "In-Zone Swing vs Fastballs Percentile",
+    "z-swing vs OFF": "In-Zone Swing vs Offspeed Percentile",
+    "z-swing vs BB": "In-Zone Swing vs Breaking Balls Percentile",
+    "o-swing vs FA": "Out-Of-Zone Swing vs Fastballs Percentile",
+    "o-swing vs OFF": "Out-Of-Zone Swing vs Offspeed Percentile",
+    "o-swing vs BB": "Out-Of-Zone Swing vs Breaking Balls Percentile",
     "sd vs FA": "Swing Decision vs Fastballs Percentile",
     "sd vs OFF": "Swing Decision vs Offspeed Percentile",
     "sd vs BB": "Swing Decision vs Breaking Balls Percentile",
     
-    "iz vs RHP FA": "In-Zone Swing vs RHP Fastballs Percentile",
-    "iz vs LHP FA": "In-Zone Swing vs LHP Fastballs Percentile",
-    "iz vs RHP OFF": "In-Zone Swing vs RHP Offspeed Percentile",
-    "iz vs LHP OFF": "In-Zone Swing vs LHP Offspeed Percentile",
-    "iz vs RHP BB": "In-Zone Swing vs RHP Breaking Balls Percentile",
-    "iz vs LHP BB": "In-Zone Swing vs LHP Breaking Balls Percentile",
-    "ooz vs RHP FA": "Out-Of-Zone No-Swing vs RHP Fastballs Percentile",
-    "ooz vs LHP FA": "Out-Of-Zone No-Swing vs LHP Fastballs Percentile",
-    "ooz vs RHP OFF": "Out-Of-Zone No-Swing vs RHP Offspeed Percentile",
-    "ooz vs LHP OFF": "Out-Of-Zone No-Swing vs LHP Offspeed Percentile",
-    "ooz vs RHP BB": "Out-Of-Zone No-Swing vs RHP Breaking Balls Percentile",
-    "ooz vs LHP BB": "Out-Of-Zone No-Swing vs LHP Breaking Balls Percentile",
+    "z-swing vs RHP FA": "In-Zone Swing vs RHP Fastballs Percentile",
+    "z-swing vs LHP FA": "In-Zone Swing vs LHP Fastballs Percentile",
+    "z-swing vs RHP OFF": "In-Zone Swing vs RHP Offspeed Percentile",
+    "z-swing vs LHP OFF": "In-Zone Swing vs LHP Offspeed Percentile",
+    "z-swing vs RHP BB": "In-Zone Swing vs RHP Breaking Balls Percentile",
+    "z-swing vs LHP BB": "In-Zone Swing vs LHP Breaking Balls Percentile",
+    "o-swing vs RHP FA": "Out-Of-Zone Swing vs RHP Fastballs Percentile",
+    "o-swing vs LHP FA": "Out-Of-Zone Swing vs LHP Fastballs Percentile",
+    "o-swing vs RHP OFF": "Out-Of-Zone Swing vs RHP Offspeed Percentile",
+    "o-swing vs LHP OFF": "Out-Of-Zone Swing vs LHP Offspeed Percentile",
+    "o-swing vs RHP BB": "Out-Of-Zone Swing vs RHP Breaking Balls Percentile",
+    "o-swing vs LHP BB": "Out-Of-Zone Swing vs LHP Breaking Balls Percentile",
     "sd vs RHP FA": "Swing Decision vs RHP Fastballs Percentile",
     "sd vs LHP FA": "Swing Decision vs LHP Fastballs Percentile",
     "sd vs RHP OFF": "Swing Decision vs RHP Offspeed Percentile",
@@ -781,9 +781,9 @@ def update_table(count, outs, bases, phand, pitch_type, split, style, view, team
                 result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd%"]]
         else:
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz", "ooz", "sd"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "z-swing", "o-swing", "sd"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz%", "ooz%", "sd%"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "z-swing%", "o-swing%", "sd%"]]
 
     # Split by pitcher hand
     elif split == "pitcher_hand":
@@ -796,9 +796,9 @@ def update_table(count, outs, bases, phand, pitch_type, split, style, view, team
                 result = result[["batter", "player", "bats", "team", "PA", "pitches", "sd% vs RHP", "sd% vs LHP"]]
         else:
             if view == "percentile":
-                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz vs RHP", "ooz vs RHP", "sd vs RHP", "iz vs LHP", "ooz vs LHP", "sd vs LHP"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "z-swing vs RHP", "o-swing vs RHP", "sd vs RHP", "z-swing vs LHP", "o-swing vs LHP", "sd vs LHP"]]
             else:
-                result = result[["batter", "player", "bats", "team", "PA", "pitches", "iz% vs RHP", "ooz% vs RHP", "sd% vs RHP", "iz% vs LHP", "ooz% vs LHP", "sd% vs LHP"]]
+                result = result[["batter", "player", "bats", "team", "PA", "pitches", "z-swing% vs RHP", "o-swing% vs RHP", "sd% vs RHP", "z-swing% vs LHP", "o-swing% vs LHP", "sd% vs LHP"]]
 
     # Split by pitch group
     elif split == "pitch_group":
@@ -812,14 +812,14 @@ def update_table(count, outs, bases, phand, pitch_type, split, style, view, team
         else:
             if view == "percentile":
                 result = result[["batter", "player", "bats", "team", "PA", "pitches",
-                                 "iz vs FA", "ooz vs FA", "sd vs FA",
-                                 "iz vs OFF", "ooz vs OFF", "sd vs OFF",
-                                 "iz vs BB", "ooz vs BB", "sd vs BB"]]
+                                 "z-swing vs FA", "o-swing vs FA", "sd vs FA",
+                                 "z-swing vs OFF", "o-swing vs OFF", "sd vs OFF",
+                                 "z-swing vs BB", "o-swing vs BB", "sd vs BB"]]
             else:
                 result = result[["batter", "player", "bats", "team", "PA", "pitches",
-                                 "iz% vs FA", "ooz% vs FA", "sd% vs FA",
-                                 "iz% vs OFF", "ooz% vs OFF", "sd% vs OFF",
-                                 "iz% vs BB", "ooz% vs BB", "sd% vs BB"]]
+                                 "z-swing% vs FA", "o-swing% vs FA", "sd% vs FA",
+                                 "z-swing% vs OFF", "o-swing% vs OFF", "sd% vs OFF",
+                                 "z-swing% vs BB", "o-swing% vs BB", "sd% vs BB"]]
 
     # Split by pitcher hand + pitch group
     elif split == "hand_group":
@@ -834,22 +834,22 @@ def update_table(count, outs, bases, phand, pitch_type, split, style, view, team
             if view == "percentile":
                 result = result[[
                     "batter", "player", "bats", "team", "PA", "pitches",
-                    "iz vs RHP FA", "ooz vs RHP FA", "sd vs RHP FA",
-                    "iz vs LHP FA", "ooz vs LHP FA", "sd vs LHP FA",
-                    "iz vs RHP OFF", "ooz vs RHP OFF", "sd vs RHP OFF",
-                    "iz vs LHP OFF", "ooz vs LHP OFF", "sd vs LHP OFF",
-                    "iz vs RHP BB", "ooz vs RHP BB", "sd vs RHP BB",
-                    "iz vs LHP BB", "ooz vs LHP BB", "sd vs LHP BB"
+                    "z-swing vs RHP FA", "o-swing vs RHP FA", "sd vs RHP FA",
+                    "z-swing vs LHP FA", "o-swing vs LHP FA", "sd vs LHP FA",
+                    "z-swing vs RHP OFF", "o-swing vs RHP OFF", "sd vs RHP OFF",
+                    "z-swing vs LHP OFF", "o-swing vs LHP OFF", "sd vs LHP OFF",
+                    "z-swing vs RHP BB", "o-swing vs RHP BB", "sd vs RHP BB",
+                    "z-swing vs LHP BB", "o-swing vs LHP BB", "sd vs LHP BB"
                 ]]
             else:
                 result = result[[
                     "batter", "player", "bats", "team", "PA", "pitches",
-                    "iz% vs RHP FA", "ooz% vs RHP FA", "sd% vs RHP FA",
-                    "iz% vs LHP FA", "ooz% vs LHP FA", "sd% vs LHP FA",
-                    "iz% vs RHP OFF", "ooz% vs RHP OFF", "sd% vs RHP OFF",
-                    "iz% vs LHP OFF", "ooz% vs LHP OFF", "sd% vs LHP OFF",
-                    "iz% vs RHP BB", "ooz% vs RHP BB", "sd% vs RHP BB",
-                    "iz% vs LHP BB", "ooz% vs LHP BB", "sd% vs LHP BB"
+                    "z-swing% vs RHP FA", "o-swing% vs RHP FA", "sd% vs RHP FA",
+                    "z-swing% vs LHP FA", "o-swing% vs LHP FA", "sd% vs LHP FA",
+                    "z-swing% vs RHP OFF", "o-swing% vs RHP OFF", "sd% vs RHP OFF",
+                    "z-swing% vs LHP OFF", "o-swing% vs LHP OFF", "sd% vs LHP OFF",
+                    "z-swing% vs RHP BB", "o-swing% vs RHP BB", "sd% vs RHP BB",
+                    "z-swing% vs LHP BB", "o-swing% vs LHP BB", "sd% vs LHP BB"
                 ]]
 
     # Team filter
